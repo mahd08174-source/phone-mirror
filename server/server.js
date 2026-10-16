@@ -42,7 +42,15 @@ wss.on('connection', (ws, req) => {
     const room = rooms.get(code); if (!room) return;
     const to = role === 'host' ? room.viewer : room.host;
     if (!to || to.readyState !== 1) return;
-    if (isBinary && to.bufferedAmount > 6e5) return; // drop frames instead of queueing lag
+    if (isBinary && role === 'host') {
+      // H.264: byte0 = 1 for keyframes. Never forward P-frames after a drop; wait for a keyframe.
+      const key = data[0] === 1;
+      if (to.bufferedAmount > 3e5) {
+        if (!room.needKey) { room.needKey = true; try { ws.send(j({ t: 'need-key' })); } catch (e) {} }
+        return;
+      }
+      if (room.needKey) { if (!key) return; room.needKey = false; }
+    }
     to.send(data, { binary: isBinary });
   });
 
