@@ -47,6 +47,8 @@ class ScreenService : Service() {
     private var lastSent = 0L
     private var w = 0
     private var h = 0
+    private var frameBmp: Bitmap? = null
+    private val jpeg = ByteArrayOutputStream(256 * 1024)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -104,9 +106,10 @@ class ScreenService : Service() {
     private fun setupCapture(handler: Handler) {
         val dm = resources.displayMetrics
         val scale = minOf(1f, 1280f / maxOf(dm.widthPixels, dm.heightPixels))
-        w = (dm.widthPixels * scale).toInt()
-        h = (dm.heightPixels * scale).toInt()
-        val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        // width multiple of 16 so the row stride has no padding on most devices (skips a per-frame crop copy)
+        w = ((dm.widthPixels * scale).toInt() / 16) * 16
+        h = (dm.heightPixels * scale).toInt() and 1.inv()
+        val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
         reader = r
         display = projection!!.createVirtualDisplay(
             "mirror", w, h, dm.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, null
@@ -116,17 +119,23 @@ class ScreenService : Service() {
             try {
                 val now = SystemClock.elapsedRealtime()
                 val sock = ws
-                if (!viewerConnected || sock == null || now - lastSent < 66 || sock.queueSize() > 2_000_000) return@setOnImageAvailableListener
+                if (!viewerConnected || sock == null || now - lastSent < 16 || sock.queueSize() > 400_000) return@setOnImageAvailableListener
                 lastSent = now
                 val p = img.planes[0]
-                val rowPad = p.rowStride - p.pixelStride * w
-                val bmp = Bitmap.createBitmap(w + rowPad / p.pixelStride, h, Bitmap.Config.ARGB_8888)
-                bmp.copyPixelsFromBuffer(p.buffer)
-                val cropped = Bitmap.createBitmap(bmp, 0, 0, w, h)
-                val out = ByteArrayOutputStream()
-                cropped.compress(Bitmap.CompressFormat.JPEG, 55, out)
-                bmp.recycle()
-                sock.send(out.toByteArray().toByteString())
+                val bw = p.rowStride / p.pixelStride
+                var bmp = frameBmp
+                if (bmp == null || bmp.width != bw || bmp.height != h) {
+                    bmp?.recycle()
+                    bmp = Bitmap.createBitmap(bw, h, Bitmap.Config.ARGB_8888)
+                    frameBmp = bmp
+                }
+                p.buffer.rewind()
+                bmp!!.copyPixelsFromBuffer(p.buffer)
+                val toSend = if (bw == w) bmp else Bitmap.createBitmap(bmp, 0, 0, w, h)
+                jpeg.reset()
+                toSend.compress(Bitmap.CompressFormat.JPEG, 60, jpeg)
+                if (toSend !== bmp) toSend.recycle()
+                sock.send(jpeg.toByteArray().toByteString())
             } finally {
                 img.close()
             }
@@ -137,13 +146,21 @@ class ScreenService : Service() {
         val req = Request.Builder().url("$url/?role=host&code=$c").build()
         ws = client.newWebSocket(req, object : WebSocketListener() {
             override fun onMessage(webSocket: WebSocket, text: String) {
-                val type = try { JSONObject(text).optString("type") } catch (e: Exception) { "" }
-                when (type) {
+                val o = try { JSONObject(text) } catch (e: Exception) { return }
+                when (o.optString("type")) {
                     "viewer-joined" -> {
                         viewerConnected = true
                         webSocket.send(JSONObject().put("type", "meta").put("w", w).put("h", h).toString())
                     }
                     "viewer-left" -> stopAll()
+                    else -> {
+                        val t = o.optString("t")
+                        val ctl = ControlService.instance ?: return
+                        if (t == "key") ctl.key(o.optString("k"))
+                        else if (t == "down" || t == "move" || t == "up") {
+                            ctl.touch(t, o.optDouble("x"), o.optDouble("y"), o.optDouble("ts"))
+                        }
+                    }
                 }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { stopAll() }
@@ -161,6 +178,7 @@ class ScreenService : Service() {
         try { display?.release() } catch (e: Exception) {}
         try { reader?.close() } catch (e: Exception) {}
         try { projection?.stop() } catch (e: Exception) {}
+        frameBmp?.recycle(); frameBmp = null
         thread?.quitSafely()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

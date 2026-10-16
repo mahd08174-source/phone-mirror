@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.widget.Button
@@ -27,6 +28,7 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var urlInput: EditText
     private lateinit var button: Button
+    private lateinit var ctlButton: Button
     private lateinit var prefs: android.content.SharedPreferences
     private val ui = Handler(Looper.getMainLooper())
     private var wasRunning = false
@@ -63,7 +65,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK)
             setPadding(dp(24), dp(24), dp(24), dp(24))
         }
-        val full = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        fun full() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         root.addView(label("Mirror", 34f, Color.WHITE, true))
         root.addView(label("Show this phone on your computer", 15f, GREY).apply { setPadding(0, dp(8), 0, dp(28)) })
@@ -84,7 +86,7 @@ class MainActivity : Activity() {
             background = rounded(0xFF0C0C0E.toInt(), 16, 0xFF26262A.toInt())
             setPadding(dp(16), dp(14), dp(16), dp(14))
         }
-        root.addView(urlInput, full.also { it.bottomMargin = dp(14) })
+        root.addView(urlInput, full().also { it.bottomMargin = dp(14) })
 
         button = Button(this).apply {
             text = "Generate code"
@@ -96,7 +98,21 @@ class MainActivity : Activity() {
             background = rounded(Color.WHITE, 16)
         }
         root.addView(button, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)))
+
+        ctlButton = Button(this).apply {
+            text = "Enable touch control"
+            isAllCaps = false
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            stateListAnimator = null
+            background = rounded(0xFF0C0C0E.toInt(), 16, 0xFF26262A.toInt())
+        }
+        root.addView(ctlButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).also { it.topMargin = dp(12) })
         setContentView(root)
+
+        ctlButton.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
 
         button.setOnClickListener {
             if (ScreenService.running) {
@@ -131,6 +147,7 @@ class MainActivity : Activity() {
     }
 
     private fun render() {
+        ctlButton.text = if (ControlService.instance != null) "Touch control: on" else "Enable touch control"
         if (ScreenService.running) {
             val c = ScreenService.code
             codeView.text = if (c.length == 6) c.substring(0, 3) + " " + c.substring(3) else ""

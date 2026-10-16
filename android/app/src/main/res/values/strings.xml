@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="a11y_desc">Lets the Mirror app tap and swipe on this phone when you control it from your computer. Only works while you are sharing.</string>
+</resources>

@@ -9,10 +9,15 @@ html,body{height:100%;margin:0;background:#000;color:#fff;font-family:-apple-sys
 h1{font-size:34px;font-weight:600;letter-spacing:-.02em;margin:0}
 p{color:#8a8a8f;margin:0 0 18px}
 input{width:300px;max-width:80vw;box-sizing:border-box;background:#0c0c0e;border:1px solid #26262a;color:#fff;border-radius:16px;padding:18px;font-size:28px;text-align:center;letter-spacing:.3em;outline:none}
-button{width:300px;max-width:80vw;font:inherit;font-size:17px;font-weight:600;padding:18px;border-radius:16px;border:0;background:#fff;color:#000;cursor:pointer}
+button{font:inherit;cursor:pointer}
+#go{width:300px;max-width:80vw;font-size:17px;font-weight:600;padding:18px;border-radius:16px;border:0;background:#fff;color:#000}
 #msg{color:#8a8a8f;min-height:22px}
-#stage{display:none;height:100%;align-items:center;justify-content:center}
-canvas{max-width:100vw;max-height:100vh;touch-action:none;background:#000}
+#stage{display:none;height:100%;flex-direction:column;align-items:center}
+#cwrap{flex:1;min-height:0;width:100%;display:flex;align-items:center;justify-content:center}
+canvas{max-width:100%;max-height:100%;touch-action:none;background:#000;cursor:pointer}
+#bar{display:flex;gap:10px;padding:10px;width:100%;box-sizing:border-box;justify-content:center}
+#bar button{flex:1;max-width:140px;padding:12px;font-size:15px;border-radius:14px;background:#0c0c0e;color:#fff;border:1px solid #26262a}
+#bar button:active{background:#1c1c20}
 </style></head><body>
 <div id="gate">
   <h1>Mirror</h1>
@@ -21,34 +26,49 @@ canvas{max-width:100vw;max-height:100vh;touch-action:none;background:#000}
   <button id="go">Connect</button>
   <div id="msg"></div>
 </div>
-<div id="stage"><canvas id="c"></canvas></div>
+<div id="stage">
+  <div id="cwrap"><canvas id="c"></canvas></div>
+  <div id="bar">
+    <button data-k="back">Back</button>
+    <button data-k="home">Home</button>
+    <button data-k="recents">Recents</button>
+  </div>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const c = $('c'), ctx = c.getContext('2d');
-let ws, busy = false, live = false;
+let ws, decoding = false, live = false, latest = null;
 
 function fail(t){ live = false; $('msg').textContent = t; $('gate').style.display = 'flex'; $('stage').style.display = 'none'; }
+
+// Always draw the newest frame; never drop the last one while a decode is running.
+async function pump(){
+  if (decoding) return; decoding = true;
+  while (latest) {
+    const blob = latest; latest = null;
+    try {
+      const b = await createImageBitmap(blob);
+      if (c.width !== b.width || c.height !== b.height) { c.width = b.width; c.height = b.height; }
+      ctx.drawImage(b, 0, 0); b.close();
+      if (!live) { live = true; $('gate').style.display = 'none'; $('stage').style.display = 'flex'; }
+    } catch (err) {}
+  }
+  decoding = false;
+}
 
 function go(){
   const code = $('code').value.replace(/\D/g, '');
   if (code.length !== 6) { $('msg').textContent = 'Code must be 6 digits.'; return; }
   $('msg').textContent = 'Connecting…';
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?role=viewer&code=' + code);
-  ws.onmessage = async e => {
+  ws.onmessage = e => {
     if (typeof e.data === 'string') {
       const m = JSON.parse(e.data);
       if (m.type === 'error') fail(m.message);
       else if (m.type === 'host-left') fail('Phone disconnected.');
       return;
     }
-    if (busy) return; busy = true;
-    try {
-      const b = await createImageBitmap(e.data);
-      if (c.width !== b.width || c.height !== b.height) { c.width = b.width; c.height = b.height; }
-      ctx.drawImage(b, 0, 0); b.close();
-      if (!live) { live = true; $('gate').style.display = 'none'; $('stage').style.display = 'flex'; }
-    } catch (err) {}
-    busy = false;
+    latest = e.data; pump();
   };
   ws.onclose = () => { if (live) fail('Disconnected.'); };
 }
@@ -56,11 +76,15 @@ function go(){
 function send(t, e){
   if (!ws || ws.readyState !== 1) return;
   const r = c.getBoundingClientRect();
-  ws.send(JSON.stringify({ t, x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }));
+  ws.send(JSON.stringify({ t, x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, ts: performance.now() }));
 }
 c.addEventListener('pointerdown', e => { c.setPointerCapture(e.pointerId); send('down', e); });
 c.addEventListener('pointermove', e => { if (e.buttons) send('move', e); });
 c.addEventListener('pointerup', e => send('up', e));
+
+document.querySelectorAll('#bar button').forEach(b => b.onclick = () => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'key', k: b.dataset.k }));
+});
 
 $('go').onclick = go;
 $('code').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
