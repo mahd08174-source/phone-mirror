@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Mirror</title>
+<style>
+  :root{--bg:#000;--fg:#fff;--mute:#8a8a8f;--line:#26262a;--card:#0c0c0e}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .view{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:max(24px,env(safe-area-inset-top)) 24px max(24px,env(safe-area-inset-bottom));text-align:center}
+  .view[hidden]{display:none}
+  h1{font-size:34px;font-weight:600;letter-spacing:-.02em;margin:0 0 8px}
+  p.sub{color:var(--mute);margin:0 0 40px;font-size:15px}
+  .stack{width:100%;max-width:340px;display:flex;flex-direction:column;gap:14px}
+  button{font:inherit;font-size:17px;font-weight:600;padding:18px;border-radius:16px;border:1px solid var(--fg);
+    cursor:pointer;transition:transform .08s,opacity .15s}
+  button:active{transform:scale(.98);opacity:.85}
+  .primary{background:var(--fg);color:#000}
+  .ghost{background:transparent;color:var(--fg);border-color:var(--line);background:var(--card)}
+  .link{background:none;border:none;color:var(--mute);font-size:15px;font-weight:500;margin-top:28px;padding:8px}
+  .code{font-size:56px;font-weight:700;letter-spacing:.12em;font-variant-numeric:tabular-nums;margin:8px 0 12px}
+  .status{color:var(--mute);font-size:15px;min-height:22px;max-width:340px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3ddc84;margin-right:8px}
+  input{width:100%;max-width:340px;background:var(--card);border:1px solid var(--line);color:var(--fg);
+    border-radius:16px;padding:18px;font-size:28px;text-align:center;letter-spacing:.3em;outline:none;margin-bottom:14px}
+  input:focus{border-color:#55555c}
+  #viewer{padding:0;background:#000;justify-content:center}
+  #remote{width:100vw;height:100vh;height:100dvh;object-fit:contain;background:#000;touch-action:none}
+  #back{position:fixed;top:max(12px,env(safe-area-inset-top));left:12px;z-index:5;padding:10px 16px;font-size:14px;
+    border-radius:999px;background:rgba(20,20,22,.7);border-color:var(--line);color:var(--fg);backdrop-filter:blur(10px)}
+  #touchDot{position:fixed;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;
+    border:2px solid #fff;background:rgba(255,255,255,.25);pointer-events:none;opacity:0;transition:opacity .15s;z-index:9}
+</style>
+</head>
+<body>
+
+<section class="view" id="home">
+  <h1>Mirror</h1>
+  <p class="sub">See one screen on another device.</p>
+  <div class="stack">
+    <button class="primary" id="btnGen">Generate code</button>
+    <button class="ghost" id="btnEnter">Enter code</button>
+  </div>
+</section>
+
+<section class="view" id="host" hidden>
+  <p class="sub" style="margin-bottom:12px">Enter this code on the other device</p>
+  <div class="code" id="code">— — —</div>
+  <div class="status" id="hostStatus"></div>
+  <button class="link" id="hostStop">Stop</button>
+</section>
+
+<section class="view" id="enter" hidden>
+  <p class="sub" style="margin-bottom:20px">Enter the 6-digit code</p>
+  <input id="codeInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="off">
+  <div class="stack"><button class="primary" id="btnJoin">Connect</button></div>
+  <div class="status" id="enterStatus" style="margin-top:16px"></div>
+  <button class="link" id="enterBack">Back</button>
+</section>
+
+<section class="view" id="viewer" hidden>
+  <button id="back">Disconnect</button>
+  <video id="remote" autoplay playsinline muted></video>
+</section>
+
+<div id="touchDot"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const PREFIX = 'pmirror-';
+  let peer = null, stream = null, conn = null;
+
+  function show(id){ document.querySelectorAll('.view').forEach(v => v.hidden = v.id !== id); }
+  function cleanup(){
+    try{ conn && conn.close(); }catch(e){}
+    try{ peer && peer.destroy(); }catch(e){}
+    if(stream){ stream.getTracks().forEach(t => t.stop()); }
+    peer = stream = conn = null;
+    $('remote').srcObject = null;
+  }
+  function home(){ cleanup(); show('home'); }
+
+  /* ---------- Generate code (host: the screen being shown) ---------- */
+  const randCode = () => String(Math.floor(Math.random() * 1e6)).padStart(6, '0');
+
+  async function generate(){
+    show('host');
+    $('code').textContent = '— — —';
+    const st = $('hostStatus');
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
+      st.textContent = "This browser can't capture its screen. Phone browsers don't allow it — a small Android app is needed for phones. Computers work.";
+      return;
+    }
+    try{
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+    }catch(e){
+      st.textContent = 'Screen sharing was cancelled.';
+      return;
+    }
+    stream.getVideoTracks()[0].addEventListener('ended', home);
+    startPeer(0);
+  }
+
+  function startPeer(tries){
+    const code = randCode();
+    peer = new Peer(PREFIX + code);
+    peer.on('open', () => {
+      $('code').textContent = code.slice(0,3) + ' ' + code.slice(3);
+      $('hostStatus').textContent = 'Waiting for the other device…';
+    });
+    peer.on('error', e => {
+      if(e.type === 'unavailable-id' && tries < 5){ try{peer.destroy();}catch(_){} startPeer(tries + 1); }
+      else $('hostStatus').textContent = 'Connection error: ' + e.type;
+    });
+    peer.on('connection', c => {
+      conn = c;
+      c.on('open', () => {
+        peer.call(c.peer, stream);
+        $('hostStatus').innerHTML = '<span class="dot"></span>Connected';
+      });
+      c.on('data', onRemoteInput);
+      c.on('close', () => { $('hostStatus').textContent = 'Other device disconnected.'; });
+    });
+  }
+
+  // Touch events arriving from the viewer. For now just show a dot (control comes later).
+  const dot = $('touchDot');
+  function onRemoteInput(m){
+    if(!m || typeof m.x !== 'number') return;
+    dot.style.left = (m.x * innerWidth) + 'px';
+    dot.style.top = (m.y * innerHeight) + 'px';
+    dot.style.opacity = m.t === 'up' ? 0 : 1;
+  }
+
+  /* ---------- Enter code (viewer) ---------- */
+  function join(){
+    const code = $('codeInput').value.replace(/\D/g, '');
+    const st = $('enterStatus');
+    if(code.length !== 6){ st.textContent = 'Code must be 6 digits.'; return; }
+    st.textContent = 'Connecting…';
+    cleanup();
+    peer = new Peer();
+    peer.on('open', () => {
+      conn = peer.connect(PREFIX + code, { reliable: true });
+      conn.on('close', () => { st.textContent = 'Disconnected.'; show('enter'); });
+    });
+    peer.on('call', call => {
+      call.answer();
+      call.on('stream', s => {
+        $('remote').srcObject = s;
+        $('remote').play().catch(()=>{});
+        show('viewer');
+      });
+      call.on('close', () => { home(); });
+    });
+    peer.on('error', e => {
+      st.textContent = e.type === 'peer-unavailable' ? 'No session found for that code.' : 'Error: ' + e.type;
+    });
+  }
+
+  /* ---------- Touch capture on the viewer (sent over the data channel) ---------- */
+  const video = $('remote');
+  function norm(e){
+    const r = video.getBoundingClientRect();
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if(!vw || !vh) return null;
+    const s = Math.min(r.width / vw, r.height / vh);
+    const w = vw * s, h = vh * s;
+    const x = (e.clientX - r.left - (r.width - w) / 2) / w;
+    const y = (e.clientY - r.top - (r.height - h) / 2) / h;
+    if(x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return { x, y };
+  }
+  let lastMove = 0;
+  function send(t, e){
+    if(!conn || !conn.open) return;
+    const p = norm(e); if(!p) return;
+    conn.send({ t, x: p.x, y: p.y });
+  }
+  video.addEventListener('pointerdown', e => { video.setPointerCapture(e.pointerId); send('down', e); });
+  video.addEventListener('pointermove', e => {
+    if(e.buttons === 0 && e.pointerType === 'mouse') return;
+    const now = performance.now(); if(now - lastMove < 16) return; lastMove = now; send('move', e);
+  });
+  video.addEventListener('pointerup', e => send('up', e));
+  video.addEventListener('pointercancel', e => send('up', e));
+
+  /* ---------- Wiring ---------- */
+  $('btnGen').onclick = generate;
+  $('btnEnter').onclick = () => { $('enterStatus').textContent = ''; show('enter'); $('codeInput').focus(); };
+  $('btnJoin').onclick = join;
+  $('codeInput').addEventListener('keydown', e => { if(e.key === 'Enter') join(); });
+  $('enterBack').onclick = home;
+  $('hostStop').onclick = home;
+  $('back').onclick = home;
+})();
+</script>
+</body>
+</html>
