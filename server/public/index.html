@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>Mirror</title>
+<style>
+html,body{height:100%;margin:0;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+#gate{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center}
+h1{font-size:34px;font-weight:600;letter-spacing:-.02em;margin:0}
+p{color:#8a8a8f;margin:0 0 18px}
+input{width:300px;max-width:80vw;box-sizing:border-box;background:#0c0c0e;border:1px solid #26262a;color:#fff;border-radius:16px;padding:18px;font-size:28px;text-align:center;letter-spacing:.3em;outline:none}
+button{width:300px;max-width:80vw;font:inherit;font-size:17px;font-weight:600;padding:18px;border-radius:16px;border:0;background:#fff;color:#000;cursor:pointer}
+#msg{color:#8a8a8f;min-height:22px}
+#stage{display:none;height:100%;align-items:center;justify-content:center}
+canvas{max-width:100vw;max-height:100vh;touch-action:none;background:#000}
+</style></head><body>
+<div id="gate">
+  <h1>Mirror</h1>
+  <p>Enter the code shown on your phone</p>
+  <input id="code" inputmode="numeric" maxlength="7" placeholder="000 000" autocomplete="off">
+  <button id="go">Connect</button>
+  <div id="msg"></div>
+</div>
+<div id="stage"><canvas id="c"></canvas></div>
+<script>
+const $ = id => document.getElementById(id);
+const c = $('c'), ctx = c.getContext('2d');
+let ws, busy = false, live = false;
+
+function fail(t){ live = false; $('msg').textContent = t; $('gate').style.display = 'flex'; $('stage').style.display = 'none'; }
+
+function go(){
+  const code = $('code').value.replace(/\D/g, '');
+  if (code.length !== 6) { $('msg').textContent = 'Code must be 6 digits.'; return; }
+  $('msg').textContent = 'Connecting…';
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/?role=viewer&code=' + code);
+  ws.onmessage = async e => {
+    if (typeof e.data === 'string') {
+      const m = JSON.parse(e.data);
+      if (m.type === 'error') fail(m.message);
+      else if (m.type === 'host-left') fail('Phone disconnected.');
+      return;
+    }
+    if (busy) return; busy = true;
+    try {
+      const b = await createImageBitmap(e.data);
+      if (c.width !== b.width || c.height !== b.height) { c.width = b.width; c.height = b.height; }
+      ctx.drawImage(b, 0, 0); b.close();
+      if (!live) { live = true; $('gate').style.display = 'none'; $('stage').style.display = 'flex'; }
+    } catch (err) {}
+    busy = false;
+  };
+  ws.onclose = () => { if (live) fail('Disconnected.'); };
+}
+
+function send(t, e){
+  if (!ws || ws.readyState !== 1) return;
+  const r = c.getBoundingClientRect();
+  ws.send(JSON.stringify({ t, x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }));
+}
+c.addEventListener('pointerdown', e => { c.setPointerCapture(e.pointerId); send('down', e); });
+c.addEventListener('pointermove', e => { if (e.buttons) send('move', e); });
+c.addEventListener('pointerup', e => send('up', e));
+
+$('go').onclick = go;
+$('code').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+</script></body></html>
