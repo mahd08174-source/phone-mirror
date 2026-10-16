@@ -8,7 +8,7 @@ const server = http.createServer((req, res) => {
   res.end(page);
 });
 
-const wss = new WebSocketServer({ server, maxPayload: 8 * 1024 * 1024 });
+const wss = new WebSocketServer({ server, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
 const rooms = new Map(); // code -> { host, viewer }
 const fails = new Map();  // ip -> { n, reset }
 const j = o => JSON.stringify(o);
@@ -42,7 +42,7 @@ wss.on('connection', (ws, req) => {
     const room = rooms.get(code); if (!room) return;
     const to = role === 'host' ? room.viewer : room.host;
     if (!to || to.readyState !== 1) return;
-    if (isBinary && to.bufferedAmount > 1e6) return; // drop frames if viewer is behind
+    if (isBinary && to.bufferedAmount > 2e5) return; // drop frames instead of queueing lag
     to.send(data, { binary: isBinary });
   });
 

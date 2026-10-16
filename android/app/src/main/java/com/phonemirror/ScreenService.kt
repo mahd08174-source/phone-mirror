@@ -32,6 +32,9 @@ import java.util.concurrent.TimeUnit
 class ScreenService : Service() {
     companion object {
         const val ACTION_STOP = "com.phonemirror.STOP"
+        const val MAX_INFLIGHT = 2      // frames sent but not yet acknowledged by the viewer
+        const val MAX_SIDE = 1024       // long edge in pixels
+        const val JPEG_QUALITY = 50
         @Volatile var running = false
         @Volatile var code = ""
     }
@@ -44,6 +47,8 @@ class ScreenService : Service() {
     private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
     @Volatile private var viewerConnected = false
     @Volatile private var stopped = false
+    @Volatile private var inflight = 0
+    @Volatile private var lastAck = 0L
     private var lastSent = 0L
     private var w = 0
     private var h = 0
@@ -105,7 +110,7 @@ class ScreenService : Service() {
 
     private fun setupCapture(handler: Handler) {
         val dm = resources.displayMetrics
-        val scale = minOf(1f, 1280f / maxOf(dm.widthPixels, dm.heightPixels))
+        val scale = minOf(1f, MAX_SIDE.toFloat() / maxOf(dm.widthPixels, dm.heightPixels))
         // width multiple of 16 so the row stride has no padding on most devices (skips a per-frame crop copy)
         w = ((dm.widthPixels * scale).toInt() / 16) * 16
         h = (dm.heightPixels * scale).toInt() and 1.inv()
@@ -119,7 +124,13 @@ class ScreenService : Service() {
             try {
                 val now = SystemClock.elapsedRealtime()
                 val sock = ws
-                if (!viewerConnected || sock == null || now - lastSent < 16 || sock.queueSize() > 400_000) return@setOnImageAvailableListener
+                if (!viewerConnected || sock == null || now - lastSent < 16) return@setOnImageAvailableListener
+                // Flow control: never get more than MAX_INFLIGHT frames ahead of the viewer.
+                // If acks stop for 1.5s, reset so a lost ack can't freeze the stream.
+                if (inflight >= MAX_INFLIGHT) {
+                    if (now - lastAck > 1500) inflight = 0 else return@setOnImageAvailableListener
+                }
+                if (sock.queueSize() > 150_000) return@setOnImageAvailableListener
                 lastSent = now
                 val p = img.planes[0]
                 val bw = p.rowStride / p.pixelStride
@@ -133,8 +144,10 @@ class ScreenService : Service() {
                 bmp!!.copyPixelsFromBuffer(p.buffer)
                 val toSend = if (bw == w) bmp else Bitmap.createBitmap(bmp, 0, 0, w, h)
                 jpeg.reset()
-                toSend.compress(Bitmap.CompressFormat.JPEG, 60, jpeg)
+                toSend.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpeg)
                 if (toSend !== bmp) toSend.recycle()
+                if (inflight == 0) lastAck = now
+                inflight++
                 sock.send(jpeg.toByteArray().toByteString())
             } finally {
                 img.close()
@@ -149,12 +162,19 @@ class ScreenService : Service() {
                 val o = try { JSONObject(text) } catch (e: Exception) { return }
                 when (o.optString("type")) {
                     "viewer-joined" -> {
+                        inflight = 0
+                        lastAck = SystemClock.elapsedRealtime()
                         viewerConnected = true
                         webSocket.send(JSONObject().put("type", "meta").put("w", w).put("h", h).toString())
                     }
                     "viewer-left" -> stopAll()
                     else -> {
                         val t = o.optString("t")
+                        if (t == "ack") {
+                            if (inflight > 0) inflight--
+                            lastAck = SystemClock.elapsedRealtime()
+                            return
+                        }
                         val ctl = ControlService.instance ?: return
                         if (t == "key") ctl.key(o.optString("k"))
                         else if (t == "down" || t == "move" || t == "up") {

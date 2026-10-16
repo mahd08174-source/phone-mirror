@@ -69,6 +69,7 @@ function go(){
       return;
     }
     latest = e.data; pump();
+    ws.send('{"t":"ack"}'); // tell the phone we got a frame so it can send the next one
   };
   ws.onclose = () => { if (live) fail('Disconnected.'); };
 }
