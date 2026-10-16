@@ -246,6 +246,10 @@ class ScreenService : Service() {
                         if (t == "key") ctl.key(o.optString("k"))
                         else if (t == "down" || t == "move" || t == "up") {
                             ctl.touch(t, o.optDouble("x"), o.optDouble("y"), o.optDouble("ts"))
+                        } else if (t == "wheel") {
+                            ctl.wheel(o.optDouble("x"), o.optDouble("y"), o.optDouble("dx"), o.optDouble("dy"))
+                        } else if (t == "type") {
+                            ctl.typeText(o.optString("s"))
                         }
                     }
                 }

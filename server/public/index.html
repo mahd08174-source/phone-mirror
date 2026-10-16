@@ -107,9 +107,40 @@ function send(t, e){
   const r = c.getBoundingClientRect();
   ws.send(JSON.stringify({ t, x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, ts: performance.now() }));
 }
-c.addEventListener('pointerdown', e => { c.setPointerCapture(e.pointerId); send('down', e); });
-c.addEventListener('pointermove', e => { if (e.buttons) send('move', e); });
-c.addEventListener('pointerup', e => send('up', e));
+let dragging = false;
+function sendKey(k){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'key', k })); }
+function sendType(s){ if (ws && ws.readyState === 1 && s) ws.send(JSON.stringify({ t: 'type', s })); }
+c.addEventListener('contextmenu', e => e.preventDefault());
+c.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (e.button === 2) { sendKey('back'); return; }   // right click = Back, like a real Android mouse
+  if (e.button === 1) { sendKey('home'); return; }   // middle click = Home
+  if (e.button !== 0) return;
+  dragging = true; c.setPointerCapture(e.pointerId); send('down', e);
+});
+c.addEventListener('pointermove', e => { if (dragging) send('move', e); });
+function endDrag(e){ if (!dragging) return; dragging = false; send('up', e); }
+c.addEventListener('pointerup', endDrag);
+c.addEventListener('pointercancel', endDrag);
+c.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!ws || ws.readyState !== 1) return;
+  const r = c.getBoundingClientRect();
+  const k = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? r.height : 1);
+  ws.send(JSON.stringify({ t: 'wheel', x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, dx: e.deltaX * k / r.width, dy: e.deltaY * k / r.height }));
+}, { passive: false });
+const KEYMAP = { Enter: 'enter', Backspace: 'bksp', Delete: 'del', ArrowLeft: 'left', ArrowRight: 'right', Escape: 'back' };
+document.addEventListener('keydown', e => {
+  if (!live || (e.target && e.target.tagName === 'INPUT')) return;
+  if (e.ctrlKey || e.metaKey) { if (e.key.toLowerCase() === 'a') { e.preventDefault(); sendKey('selectall'); } return; }
+  if (KEYMAP[e.key]) { e.preventDefault(); sendKey(KEYMAP[e.key]); }
+  else if (e.key.length === 1 && !e.altKey) { e.preventDefault(); sendType(e.key); }
+});
+document.addEventListener('paste', e => {
+  if (!live) return;
+  const tx = e.clipboardData && e.clipboardData.getData('text');
+  if (tx) { e.preventDefault(); sendType(tx); }
+});
 
 document.querySelectorAll('#bar button').forEach(b => b.onclick = () => {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'key', k: b.dataset.k }));
