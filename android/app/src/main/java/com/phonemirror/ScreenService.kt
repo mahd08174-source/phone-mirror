@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit
 class ScreenService : Service() {
     companion object {
         const val ACTION_STOP = "com.phonemirror.STOP"
-        const val MAX_INFLIGHT = 2      // frames sent but not yet acknowledged by the viewer
+        const val MAX_INFLIGHT = 6      // frames sent but not yet acknowledged by the viewer
         const val MAX_SIDE = 1024       // long edge in pixels
         const val JPEG_QUALITY = 50
         @Volatile var running = false
@@ -124,13 +124,13 @@ class ScreenService : Service() {
             try {
                 val now = SystemClock.elapsedRealtime()
                 val sock = ws
-                if (!viewerConnected || sock == null || now - lastSent < 16) return@setOnImageAvailableListener
+                if (!viewerConnected || sock == null || now - lastSent < 12) return@setOnImageAvailableListener
                 // Flow control: never get more than MAX_INFLIGHT frames ahead of the viewer.
                 // If acks stop for 1.5s, reset so a lost ack can't freeze the stream.
                 if (inflight >= MAX_INFLIGHT) {
                     if (now - lastAck > 1500) inflight = 0 else return@setOnImageAvailableListener
                 }
-                if (sock.queueSize() > 150_000) return@setOnImageAvailableListener
+                if (sock.queueSize() > 400_000) return@setOnImageAvailableListener
                 lastSent = now
                 val p = img.planes[0]
                 val bw = p.rowStride / p.pixelStride
