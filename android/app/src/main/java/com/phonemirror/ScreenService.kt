@@ -7,18 +7,18 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
-import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.ImageReader
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import android.os.SystemClock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -26,34 +26,39 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
+/**
+ * Screen capture -> hardware H.264 (MediaCodec) -> WebSocket relay.
+ * The VirtualDisplay renders straight into the encoder's input surface, so there is no
+ * per-frame bitmap copy or JPEG work on the CPU.
+ *
+ * Wire format (binary): byte 0 = 1 for a keyframe (SPS/PPS prepended), else 0; rest = Annex B NAL units.
+ */
 class ScreenService : Service() {
     companion object {
         const val ACTION_STOP = "com.phonemirror.STOP"
-        const val MAX_INFLIGHT = 6      // frames sent but not yet acknowledged by the viewer
-        const val MAX_SIDE = 1024       // long edge in pixels
-        const val JPEG_QUALITY = 50
+        const val MAX_SIDE = 1280          // long edge in pixels
+        const val FPS = 60
+        const val BITRATE = 8_000_000      // bits per second
+        const val MAX_QUEUE = 300_000      // bytes queued on the socket before frames are dropped
         @Volatile var running = false
         @Volatile var code = ""
     }
 
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
-    private var reader: ImageReader? = null
+    private var codec: MediaCodec? = null
     private var thread: HandlerThread? = null
+    private var encThread: Thread? = null
     private var ws: WebSocket? = null
     private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
     @Volatile private var viewerConnected = false
     @Volatile private var stopped = false
-    @Volatile private var inflight = 0
-    @Volatile private var lastAck = 0L
-    private var lastSent = 0L
+    @Volatile private var waitingKey = true
+    @Volatile private var config: ByteArray? = null
     private var w = 0
     private var h = 0
-    private var frameBmp: Bitmap? = null
-    private val jpeg = ByteArrayOutputStream(256 * 1024)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -72,6 +77,9 @@ class ScreenService : Service() {
         if (data == null) { stopAll(); return START_NOT_STICKY }
 
         stopped = false
+        waitingKey = true
+        viewerConnected = false
+        config = null
         code = c
         running = true
 
@@ -83,7 +91,12 @@ class ScreenService : Service() {
             override fun onStop() { stopAll() }
         }, handler)
 
-        setupCapture(handler)
+        try {
+            setupCapture()
+        } catch (e: Exception) {
+            stopAll()
+            return START_NOT_STICKY
+        }
         connect(url, c)
         return START_NOT_STICKY
     }
@@ -108,51 +121,108 @@ class ScreenService : Service() {
         }
     }
 
-    private fun setupCapture(handler: Handler) {
+    private fun createEncoder(width: Int, height: Int): MediaCodec {
+        var last: Exception? = null
+        for (full in listOf(true, false)) {
+            val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            try {
+                val f = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+                f.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                f.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
+                f.setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
+                f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                // keep frames flowing on a static screen so a requested keyframe always comes out
+                f.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+                if (full) {
+                    f.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                    f.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                    f.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                    if (Build.VERSION.SDK_INT >= 29) f.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                    if (Build.VERSION.SDK_INT >= 30) f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                }
+                c.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return c
+            } catch (e: Exception) {
+                last = e
+                try { c.release() } catch (_: Exception) {}
+            }
+        }
+        throw last ?: IllegalStateException("no encoder")
+    }
+
+    private fun setupCapture() {
         val dm = resources.displayMetrics
         val scale = minOf(1f, MAX_SIDE.toFloat() / maxOf(dm.widthPixels, dm.heightPixels))
-        // width multiple of 16 so the row stride has no padding on most devices (skips a per-frame crop copy)
-        w = ((dm.widthPixels * scale).toInt() / 16) * 16
-        h = (dm.heightPixels * scale).toInt() and 1.inv()
-        val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
-        reader = r
+        // encoders like dimensions that are multiples of 16
+        w = maxOf(16, ((dm.widthPixels * scale).toInt() + 8) / 16 * 16)
+        h = maxOf(16, ((dm.heightPixels * scale).toInt() + 8) / 16 * 16)
+
+        val c = createEncoder(w, h)
+        codec = c
+        val surface = c.createInputSurface()
+        c.start()
         display = projection!!.createVirtualDisplay(
-            "mirror", w, h, dm.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, null
+            "mirror", w, h, dm.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null
         )
-        r.setOnImageAvailableListener({ rd ->
-            val img = rd.acquireLatestImage() ?: return@setOnImageAvailableListener
-            try {
-                val now = SystemClock.elapsedRealtime()
-                val sock = ws
-                if (!viewerConnected || sock == null || now - lastSent < 12) return@setOnImageAvailableListener
-                // Flow control: never get more than MAX_INFLIGHT frames ahead of the viewer.
-                // If acks stop for 1.5s, reset so a lost ack can't freeze the stream.
-                if (inflight >= MAX_INFLIGHT) {
-                    if (now - lastAck > 1500) inflight = 0 else return@setOnImageAvailableListener
+        encThread = Thread({ drainLoop(c) }, "enc-out").also { it.start() }
+    }
+
+    private fun drainLoop(c: MediaCodec) {
+        val info = MediaCodec.BufferInfo()
+        try {
+            while (!stopped) {
+                val i = c.dequeueOutputBuffer(info, 20_000)
+                if (i < 0) continue
+                try {
+                    val buf = c.getOutputBuffer(i)
+                    if (buf != null && info.size > 0) {
+                        buf.position(info.offset)
+                        buf.limit(info.offset + info.size)
+                        val data = ByteArray(info.size)
+                        buf.get(data)
+                        if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                            config = data
+                        } else {
+                            sendFrame(data, info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
+                        }
+                    }
+                } finally {
+                    c.releaseOutputBuffer(i, false)
                 }
-                if (sock.queueSize() > 400_000) return@setOnImageAvailableListener
-                lastSent = now
-                val p = img.planes[0]
-                val bw = p.rowStride / p.pixelStride
-                var bmp = frameBmp
-                if (bmp == null || bmp.width != bw || bmp.height != h) {
-                    bmp?.recycle()
-                    bmp = Bitmap.createBitmap(bw, h, Bitmap.Config.ARGB_8888)
-                    frameBmp = bmp
-                }
-                p.buffer.rewind()
-                bmp!!.copyPixelsFromBuffer(p.buffer)
-                val toSend = if (bw == w) bmp else Bitmap.createBitmap(bmp, 0, 0, w, h)
-                jpeg.reset()
-                toSend.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpeg)
-                if (toSend !== bmp) toSend.recycle()
-                if (inflight == 0) lastAck = now
-                inflight++
-                sock.send(jpeg.toByteArray().toByteString())
-            } finally {
-                img.close()
             }
-        }, handler)
+        } catch (e: Exception) {
+            if (!stopped) stopAll()
+        }
+    }
+
+    private fun sendFrame(data: ByteArray, key: Boolean) {
+        val sock = ws
+        if (!viewerConnected || sock == null) return
+        if (sock.queueSize() > MAX_QUEUE) {
+            // never queue lag: drop, and make sure the next thing sent is a keyframe
+            if (!waitingKey) { waitingKey = true; requestKey() }
+            return
+        }
+        if (waitingKey && !key) return
+        if (key) waitingKey = false
+        val cfg = config
+        val out: ByteArray
+        if (key && cfg != null) {
+            out = ByteArray(1 + cfg.size + data.size)
+            System.arraycopy(cfg, 0, out, 1, cfg.size)
+            System.arraycopy(data, 0, out, 1 + cfg.size, data.size)
+        } else {
+            out = ByteArray(1 + data.size)
+            System.arraycopy(data, 0, out, 1, data.size)
+        }
+        out[0] = if (key) 1 else 0
+        sock.send(out.toByteString())
+    }
+
+    private fun requestKey() {
+        try {
+            codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+        } catch (_: Exception) {}
     }
 
     private fun connect(url: String, c: String) {
@@ -162,19 +232,16 @@ class ScreenService : Service() {
                 val o = try { JSONObject(text) } catch (e: Exception) { return }
                 when (o.optString("type")) {
                     "viewer-joined" -> {
-                        inflight = 0
-                        lastAck = SystemClock.elapsedRealtime()
+                        waitingKey = true
                         viewerConnected = true
                         webSocket.send(JSONObject().put("type", "meta").put("w", w).put("h", h).toString())
+                        requestKey()
                     }
                     "viewer-left" -> stopAll()
                     else -> {
                         val t = o.optString("t")
-                        if (t == "ack") {
-                            if (inflight > 0) inflight--
-                            lastAck = SystemClock.elapsedRealtime()
-                            return
-                        }
+                        if (t == "ack") return
+                        if (t == "need-key") { waitingKey = true; requestKey(); return }
                         val ctl = ControlService.instance ?: return
                         if (t == "key") ctl.key(o.optString("k"))
                         else if (t == "down" || t == "move" || t == "up") {
@@ -196,9 +263,9 @@ class ScreenService : Service() {
         viewerConnected = false
         try { ws?.close(1000, null) } catch (e: Exception) {}
         try { display?.release() } catch (e: Exception) {}
-        try { reader?.close() } catch (e: Exception) {}
+        try { codec?.stop() } catch (e: Exception) {}
+        try { codec?.release() } catch (e: Exception) {}
         try { projection?.stop() } catch (e: Exception) {}
-        frameBmp?.recycle(); frameBmp = null
         thread?.quitSafely()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
