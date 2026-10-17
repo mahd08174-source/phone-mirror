@@ -108,7 +108,7 @@ function send(t, e){
   ws.send(JSON.stringify({ t, x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, ts: performance.now() }));
 }
 let dragging = false;
-function sendKey(k){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'key', k })); }
+function sendKey(k, x){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(Object.assign({ t: 'key', k }, x || {}))); }
 function sendType(s){ if (ws && ws.readyState === 1 && s) ws.send(JSON.stringify({ t: 'type', s })); }
 c.addEventListener('contextmenu', e => e.preventDefault());
 c.addEventListener('pointerdown', e => {
@@ -129,11 +129,20 @@ c.addEventListener('wheel', e => {
   const k = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? r.height : 1);
   ws.send(JSON.stringify({ t: 'wheel', x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, dx: e.deltaX * k / r.width, dy: e.deltaY * k / r.height }));
 }, { passive: false });
-const KEYMAP = { Enter: 'enter', Backspace: 'bksp', Delete: 'del', ArrowLeft: 'left', ArrowRight: 'right', Escape: 'back' };
+const KEYMAP = { Enter: 'enter', Backspace: 'bksp', Delete: 'del', ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', Tab: 'tab', Home: 'linehome', End: 'lineend', PageUp: 'pgup', PageDown: 'pgdn' };
 document.addEventListener('keydown', e => {
   if (!live || (e.target && e.target.tagName === 'INPUT')) return;
-  if (e.ctrlKey || e.metaKey) { if (e.key.toLowerCase() === 'a') { e.preventDefault(); sendKey('selectall'); } return; }
-  if (KEYMAP[e.key]) { e.preventDefault(); sendKey(KEYMAP[e.key]); }
+  const mod = { sh: e.shiftKey ? 1 : 0, ct: (e.ctrlKey || e.metaKey) ? 1 : 0 };
+  if (e.ctrlKey || e.metaKey) {
+    const l = e.key.toLowerCase();
+    if (l === 'v') return;  // let the browser fire "paste", handled below
+    const name = { a: 'selectall', c: 'copy', x: 'cut' }[l];
+    if (name) { e.preventDefault(); sendKey(name); }
+    else if (l.length === 1) { e.preventDefault(); sendKey('letter', { ch: l, sh: mod.sh, ct: 1 }); }
+    return;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); sendKey('back'); return; }
+  if (KEYMAP[e.key]) { e.preventDefault(); sendKey(KEYMAP[e.key], mod); }
   else if (e.key.length === 1 && !e.altKey) { e.preventDefault(); sendType(e.key); }
 });
 document.addEventListener('paste', e => {

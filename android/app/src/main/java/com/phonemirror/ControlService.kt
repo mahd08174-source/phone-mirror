@@ -67,18 +67,25 @@ class ControlService : AccessibilityService() {
 
     // ================= keys =================
 
-    fun key(k: String) {
+    fun key(k: String, shift: Boolean = false, ctrl: Boolean = false, ch: String = "") {
         main.post {
             when (k) {
                 "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
                 "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
                 "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
-                "enter" -> pressEnter()
-                "bksp" -> deleteText(true)
-                "del" -> deleteText(false)
-                "left" -> moveCursor(-1)
-                "right" -> moveCursor(1)
-                "selectall" -> selectAll()
+                else -> {
+                    // preferred: the Mirror keyboard delivers real key events like a hardware keyboard
+                    val kb = KeyboardService.instance
+                    if (kb != null && kb.handleKey(k, shift, ctrl, ch)) return@post
+                    when (k) {
+                        "enter" -> pressEnter()
+                        "bksp" -> deleteText(true)
+                        "del" -> deleteText(false)
+                        "left" -> moveCursor(-1)
+                        "right" -> moveCursor(1)
+                        "selectall" -> selectAll()
+                    }
+                }
             }
         }
     }
@@ -114,6 +121,8 @@ class ControlService : AccessibilityService() {
 
     fun typeText(s: String) {
         main.post {
+            val kb = KeyboardService.instance
+            if (kb != null && kb.commit(s)) return@post
             val n = focusedInput() ?: return@post
             val sel = readSel(n)
             writeText(n, sel.text.substring(0, sel.lo) + s + sel.text.substring(sel.hi), sel.lo + s.length)

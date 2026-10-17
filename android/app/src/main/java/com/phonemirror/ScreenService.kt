@@ -234,6 +234,7 @@ class ScreenService : Service() {
                     "viewer-joined" -> {
                         waitingKey = true
                         viewerConnected = true
+                        KeyboardService.setRemote(true)
                         webSocket.send(JSONObject().put("type", "meta").put("w", w).put("h", h).toString())
                         requestKey()
                     }
@@ -243,7 +244,7 @@ class ScreenService : Service() {
                         if (t == "ack") return
                         if (t == "need-key") { waitingKey = true; requestKey(); return }
                         val ctl = ControlService.instance ?: return
-                        if (t == "key") ctl.key(o.optString("k"))
+                        if (t == "key") ctl.key(o.optString("k"), o.optInt("sh") == 1, o.optInt("ct") == 1, o.optString("ch"))
                         else if (t == "down" || t == "move" || t == "up") {
                             ctl.touch(t, o.optDouble("x"), o.optDouble("y"), o.optDouble("ts"))
                         } else if (t == "wheel") {
@@ -265,6 +266,7 @@ class ScreenService : Service() {
         running = false
         code = ""
         viewerConnected = false
+        KeyboardService.setRemote(false)
         try { ws?.close(1000, null) } catch (e: Exception) {}
         try { display?.release() } catch (e: Exception) {}
         try { codec?.stop() } catch (e: Exception) {}

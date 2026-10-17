@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
+import android.view.inputmethod.InputMethodManager
 import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
@@ -29,6 +30,7 @@ class MainActivity : Activity() {
     private lateinit var urlInput: EditText
     private lateinit var button: Button
     private lateinit var ctlButton: Button
+    private lateinit var kbButton: Button
     private lateinit var prefs: android.content.SharedPreferences
     private val ui = Handler(Looper.getMainLooper())
     private var wasRunning = false
@@ -108,7 +110,21 @@ class MainActivity : Activity() {
             background = rounded(0xFF0C0C0E.toInt(), 16, 0xFF26262A.toInt())
         }
         root.addView(ctlButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).also { it.topMargin = dp(12) })
+        kbButton = Button(this).apply {
+            text = "Enable keyboard"
+            isAllCaps = false
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            stateListAnimator = null
+            background = rounded(0xFF0C0C0E.toInt(), 16, 0xFF26262A.toInt())
+        }
+        root.addView(kbButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).also { it.topMargin = dp(12) })
         setContentView(root)
+
+        kbButton.setOnClickListener {
+            if (!kbEnabled()) startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+            else (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+        }
 
         ctlButton.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -146,7 +162,19 @@ class MainActivity : Activity() {
         startForegroundService(i)
     }
 
+    private fun kbEnabled(): Boolean =
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .enabledInputMethodList.any { it.packageName == packageName }
+
+    private fun kbSelected(): Boolean =
+        (Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: "").startsWith("$packageName/")
+
     private fun render() {
+        kbButton.text = when {
+            !kbEnabled() -> "Enable keyboard"
+            !kbSelected() -> "Select Mirror keyboard"
+            else -> "Keyboard: on"
+        }
         ctlButton.text = if (ControlService.instance != null) "Touch control: on" else "Enable touch control"
         if (ScreenService.running) {
             val c = ScreenService.code
